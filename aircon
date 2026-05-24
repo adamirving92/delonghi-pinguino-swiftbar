@@ -364,6 +364,42 @@ def cmd_raw(env, args):
     print(json.dumps(p, indent=2, default=str))
 
 
+def mask_value(value: str) -> str:
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:3]}...{value[-3:]}"
+
+
+def cmd_doctor(env, _args):
+    print("Config")
+    print(f"  .env:        {'present' if ENV_PATH.exists() else 'missing'} ({ENV_PATH})")
+    if ENV_PATH.exists():
+        mode = ENV_PATH.stat().st_mode & 0o777
+        mode_note = "ok" if mode == 0o600 else "recommend chmod 600 .env"
+        print(f"  .env mode:   {mode:o} ({mode_note})")
+    for key in REQUIRED_ENV_KEYS:
+        value = env.get(key, "")
+        status = "set" if value else "missing"
+        print(f"  {key}: {status}")
+    dsn = env.get("DELONGHI_DSN", "")
+    print(f"  DELONGHI_DSN: {'set (' + mask_value(dsn) + ')' if dsn else 'not set; first device will be used'}")
+
+    print("\nToken cache")
+    if TOKEN_PATH.exists():
+        mode = TOKEN_PATH.stat().st_mode & 0o777
+        mode_note = "ok" if mode == 0o600 else "recommend chmod 600 .tokens.json"
+        print(f"  .tokens.json: present, mode {mode:o} ({mode_note})")
+    else:
+        print("  .tokens.json: missing; it will be created after login")
+
+    missing = [key for key in REQUIRED_ENV_KEYS if not env.get(key)]
+    print("\nNext step")
+    if missing:
+        print(f"  Fill in missing values: {', '.join(missing)}")
+    else:
+        print("  Config has all required keys. Run: ./aircon devices")
+
+
 def cmd_login(env, _args):
     """Force a fresh login (deletes cached tokens)."""
     if TOKEN_PATH.exists():
@@ -389,6 +425,7 @@ def main() -> None:
     p_silent = sub.add_parser("silent", help="Silent mode on/off")
     p_silent.add_argument("state", choices=["on", "off"])
     sub.add_parser("raw", help="Dump all device properties as JSON")
+    sub.add_parser("doctor", help="Check local config without contacting the device")
     sub.add_parser("login", help="Force fresh login")
 
     args = parser.parse_args()
@@ -396,7 +433,7 @@ def main() -> None:
     dispatch = {
         "devices": cmd_devices, "status": cmd_status, "on": cmd_on, "off": cmd_off,
         "temp": cmd_temp, "mode": cmd_mode, "fan": cmd_fan, "silent": cmd_silent,
-        "raw": cmd_raw, "login": cmd_login,
+        "raw": cmd_raw, "doctor": cmd_doctor, "login": cmd_login,
     }
     dispatch[args.cmd](env, args)
 
