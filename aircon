@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""Control a De'Longhi Pinguino aircon via the De'Longhi Comfort cloud."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, quote, urlparse
+
+import requests
+
+HERE = Path(__file__).resolve().parent
+ENV_PATH = HERE / ".env"
+TOKEN_PATH = HERE / ".tokens.json"
+
+SDK_BUILD = 16650
+REQUIRED_ENV_KEYS = (
+    "DELONGHI_EMAIL",
+    "DELONGHI_PASSWORD",
+    "DELONGHI_API_KEY",
+    "DELONGHI_CLIENT_ID",
+    "DELONGHI_CLIENT_SECRET",
+    "DELONGHI_APP_ID",
+    "DELONGHI_APP_SECRET",
+)
+
+UA_BROWSER = "Mozilla/5.0 (iPhone; CPU iPhone OS 13_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/79.0.3945.73 Mobile/15E148 Safari/604.1"
+UA_TOKEN = "DeLonghiComfort/3 CFNetwork/1568.300.101 Darwin/24.2.0"
+UA_API = "DeLonghiComfort/5.1.1 (iPhone; iOS 18.2; Scale/3.00)"
+
+MODE_MAP = {"cool": 1, "dry": 2, "fan": 3, "cooling": 1, "dehumidify": 2}
+MODE_LABEL = {1: "cool", 2: "dry", 3: "fan"}
+FAN_MAP = {"low": 1, "mid": 2, "med": 2, "medium": 2, "high": 3, "auto": 4}
+FAN_LABEL = {1: "low", 2: "mid", 3: "high", 4: "auto"}
+
+
+def load_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not ENV_PATH.exists():
+        sys.exit(f"Missing {ENV_PATH}. Copy .env.example to .env and fill in your values.")
+    for line in ENV_PATH.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip().strip('"').strip("'")
+    for key in REQUIRED_ENV_KEYS + ("DELONGHI_DSN",):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
+def require_env(env: dict[str, str], key: str) -> str:
+    value = env.get(key)
+    if not value:
+        sys.exit(f"Missing {key}. Add it to {ENV_PATH} or export it in your shell.")
+    return value
+
+
+def load_tokens() -> dict[str, str] | None:
+    if TOKEN_PATH.exists():
+        try:
+            return json.loads(TOKEN_PATH.read_text())
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def save_tokens(access: str, refresh: str) -> None:
+    TOKEN_PATH.write_text(json.dumps({"access": access, "refresh": refresh}))
+    TOKEN_PATH.chmod(0o600)
+
+
+def qparam(url: str, name: str) -> str | None:
+    return parse_qs(urlparse(url).query).get(name, [None])[0]
+
+
+def authenticate(session: requests.Session, env: dict[str, str]) -> tuple[str, str]:
+    """Run the 8-step Gigya → Ayla auth flow. Returns (access_token, refresh_token)."""
+    email = require_env(env, "DELONGHI_EMAIL")
+    password = require_env(env, "DELONGHI_PASSWORD")
+    api_key = require_env(env, "DELONGHI_API_KEY")
+    client_id = require_env(env, "DELONGHI_CLIENT_ID")
+    client_secret = require_env(env, "DELONGHI_CLIENT_SECRET")
+    app_id = require_env(env, "DELONGHI_APP_ID")
+    app_secret = require_env(env, "DELONGHI_APP_SECRET")
+    auth_header = "Basic " + base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+    r = session.get(
+        f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{api_key}/authorize",
+        headers={"User-Agent": UA_BROWSER},
+        params={
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": "https://google.it",
+            "scope": "openid email profile UID comfort en alexa",
+            "nonce": str(int(datetime.now().timestamp())),
+        },
+        allow_redirects=False,
+    )
+    context = qparam(r.headers["Location"], "context")
+
+    r = session.get(
+        "https://socialize.eu1.gigya.com/socialize.getIDs",
+        headers={"User-Agent": UA_BROWSER},
+        params={
+            "APIKey": api_key,
+            "includeTicket": "true",
+            "pageURL": "https://aylaopenid.delonghigroup.com/",
+            "sdk": "js_latest",
+            "sdkBuild": SDK_BUILD,
+            "format": "json",
+        },
+    )
+    ids = r.json()
+    ucid, gmid, gmid_ticket = ids["ucid"], ids["gmid"], ids["gmidTicket"]
+
+    risk_context = json.dumps({
+        "b0": 4494, "b1": [0, 2, 2, 0], "b2": 2, "b3": [], "b4": 2, "b5": 1,
+        "b6": UA_BROWSER,
+        "b7": [{"name": n, "filename": "internal-pdf-viewer", "length": 2} for n in
+               ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer",
+                "Microsoft Edge PDF Viewer", "WebKit built-in PDF"]],
+        "b8": datetime.now().strftime("%H:%M:%S"),
+        "b9": 0, "b10": {"state": "denied"}, "b11": False,
+        "b13": [5, "440|956|24", False, True],
+    })
+
+    r = session.post(
+        "https://accounts.eu1.gigya.com/accounts.login",
+        headers={"User-Agent": UA_BROWSER},
+        data={
+            "loginID": email, "password": password,
+            "sessionExpiration": 7884009, "targetEnv": "jssdk",
+            "include": "profile,data,emails,subscriptions,preferences",
+            "includeUserInfo": "true", "loginMode": "standard", "lang": "en",
+            "riskContext": quote(risk_context),
+            "APIKey": api_key, "source": "showScreenSet", "sdk": "js_latest",
+            "authMode": "cookie", "pageURL": "https://aylaopenid.delonghigroup.com/",
+            "gmid": gmid, "ucid": ucid, "sdkBuild": SDK_BUILD, "format": "json",
+        },
+    )
+    login = r.json()
+    if login.get("statusCode") != 200:
+        sys.exit(f"Login failed: {login.get('errorDetails', login)}")
+    login_token = login["sessionInfo"]["login_token"]
+
+    r = session.post(
+        "https://socialize.eu1.gigya.com/socialize.getUserInfo",
+        headers={"User-Agent": UA_BROWSER},
+        data={
+            "enabledProviders": "*", "APIKey": api_key, "sdk": "js_latest",
+            "login_token": login_token, "authMode": "cookie",
+            "pageURL": "https://aylaopenid.delonghigroup.com/",
+            "gmid": gmid, "ucid": ucid, "sdkBuild": SDK_BUILD, "format": "json",
+        },
+    )
+    user = r.json()
+    uid, uid_sig, sig_ts = user["UID"], user["UIDSignature"], user["signatureTimestamp"]
+
+    r = session.get(
+        "https://aylaopenid.delonghigroup.com/OIDCConsentPage.php",
+        headers={"User-Agent": UA_BROWSER},
+        params={
+            "lang": "en", "context": context, "clientID": client_id,
+            "scope": "openid+email+profile+UID+comfort+en+alexa",
+            "UID": uid, "UIDSignature": uid_sig, "signatureTimestamp": sig_ts,
+        },
+    )
+    consent_sig = r.text.split("const consentObj2Sig = '")[1].split("';")[0]
+
+    r = session.get(
+        f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{api_key}/authorize/continue",
+        headers={"User-Agent": UA_BROWSER},
+        params={
+            "context": context, "login_token": login_token,
+            "consent": json.dumps({
+                "scope": "openid email profile UID comfort en alexa",
+                "clientID": client_id, "context": context, "UID": uid, "consent": True,
+            }, separators=(",", ":")),
+            "sig": consent_sig, "gmidTicket": gmid_ticket,
+        },
+        allow_redirects=False,
+    )
+    code = qparam(r.headers["Location"], "code")
+
+    r = session.post(
+        f"https://fidm.eu1.gigya.com/oidc/op/v1.0/{api_key}/token",
+        headers={
+            "User-Agent": UA_TOKEN, "Authorization": auth_header,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data={"code": code, "grant_type": "authorization_code", "redirect_uri": "https://google.it"},
+    )
+    idp_token = r.json()["access_token"]
+
+    r = session.post(
+        "https://user-field-eu.aylanetworks.com/api/v1/token_sign_in",
+        headers={"User-Agent": UA_TOKEN},
+        data={"app_id": app_id, "app_secret": app_secret, "token": idp_token},
+    )
+    ayla = r.json()
+    return ayla["access_token"], ayla["refresh_token"]
+
+
+def refresh_access(refresh: str) -> tuple[str, str] | None:
+    try:
+        r = requests.post(
+            "https://user-field-eu.aylanetworks.com/users/refresh_token.json",
+            headers={"User-Agent": UA_TOKEN, "Content-Type": "application/json"},
+            json={"user": {"refresh_token": refresh}},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        return d["access_token"], d.get("refresh_token", refresh)
+    except Exception:
+        return None
+
+
+def get_access(env: dict[str, str], force_refresh: bool = False) -> str:
+    cached = load_tokens()
+    if cached and not force_refresh:
+        return cached["access"]
+    if cached and (new := refresh_access(cached["refresh"])):
+        save_tokens(*new)
+        return new[0]
+    session = requests.Session()
+    access, refresh = authenticate(session, env)
+    save_tokens(access, refresh)
+    return access
+
+
+def api_get(env: dict[str, str], path: str) -> Any:
+    access = get_access(env)
+    for attempt in range(2):
+        r = requests.get(
+            f"https://ads-eu.aylanetworks.com/{path}",
+            headers={"User-Agent": UA_API, "Authorization": f"auth_token {access}", "Accept": "application/json"},
+            timeout=15,
+        )
+        if r.status_code == 401 and attempt == 0:
+            access = get_access(env, force_refresh=True)
+            continue
+        r.raise_for_status()
+        return r.json()
+
+
+def api_post(env: dict[str, str], path: str, data: dict) -> Any:
+    access = get_access(env)
+    for attempt in range(2):
+        r = requests.post(
+            f"https://ads-eu.aylanetworks.com/{path}",
+            headers={"User-Agent": UA_API, "Authorization": f"auth_token {access}", "Content-Type": "application/json"},
+            json=data,
+            timeout=15,
+        )
+        if r.status_code == 401 and attempt == 0:
+            access = get_access(env, force_refresh=True)
+            continue
+        r.raise_for_status()
+        return r.json()
+
+
+def get_dsn(env: dict[str, str]) -> str:
+    if (dsn := os.environ.get("DELONGHI_DSN")) or (dsn := env.get("DELONGHI_DSN")):
+        return dsn
+    devices = api_get(env, "apiv1/devices.json")
+    if not devices:
+        sys.exit("No devices found on this account.")
+    return devices[0]["device"]["dsn"]
+
+
+def get_props(env: dict[str, str], dsn: str) -> dict[str, Any]:
+    props = api_get(env, f"apiv1/dsns/{dsn}/properties.json")
+    return {p["property"]["name"]: p["property"]["value"] for p in props}
+
+
+def set_prop(env: dict[str, str], dsn: str, name: str, value: Any) -> None:
+    api_post(env, f"apiv1/dsns/{dsn}/properties/{name}/datapoints.json",
+             {"datapoint": {"value": value}})
+
+
+def cmd_devices(env: dict[str, str], _args) -> None:
+    for d in api_get(env, "apiv1/devices.json"):
+        dev = d["device"]
+        print(f"{dev.get('dsn')}  {dev.get('product_name', '?')}  ({dev.get('connection_status', '?')})")
+
+
+def cmd_status(env: dict[str, str], _args) -> None:
+    dsn = get_dsn(env)
+    p = get_props(env, dsn)
+    on = p.get("get_device_status")
+    mode = p.get("get_device_mode")
+    fan = p.get("get_int_fan_speed")
+    silent = p.get("get_silent_function")
+    swing = p.get("get_swing_function")
+    setpoint = p.get("temp_setpoint")
+    room_t, room_h = p.get("room_temp"), p.get("room_hum")
+    out_t, out_h = p.get("outdoor_temp"), p.get("outdoor_hum")
+    weather = p.get("outdoor_Weather_condition")
+    model = p.get("appliance_model")
+    print(f"Device:    {dsn} ({model})")
+    print(f"Power:     {'ON' if on == 1 else 'OFF'}")
+    print(f"Mode:      {MODE_LABEL.get(mode, '?')}")
+    print(f"Setpoint:  {setpoint}°C")
+    print(f"Room:      {room_t}°C / {room_h}% humidity")
+    print(f"Outdoor:   {out_t}°C / {out_h}% — {weather}")
+    print(f"Fan:       {FAN_LABEL.get(fan, '?')}")
+    print(f"Silent:    {'ON' if silent == 1 else 'OFF'}")
+    print(f"Swing:     {'ON' if swing == 1 else 'OFF'}")
+
+
+def cmd_on(env, _args):
+    set_prop(env, get_dsn(env), "set_device_status", "1")
+    print("ON")
+
+
+def cmd_off(env, _args):
+    set_prop(env, get_dsn(env), "set_device_status", "2")
+    print("OFF")
+
+
+def cmd_temp(env, args):
+    t = float(args.temperature)
+    if not 18 <= t <= 32:
+        sys.exit("Temperature must be 18-32°C (EL110 minimum is 18°C).")
+    set_prop(env, get_dsn(env), "set_temp_setpoint", t)
+    print(f"Setpoint → {t}°C")
+
+
+def cmd_mode(env, args):
+    m = MODE_MAP.get(args.mode.lower())
+    if m is None:
+        sys.exit(f"Mode must be one of: {', '.join(sorted(MODE_MAP))}")
+    set_prop(env, get_dsn(env), "set_device_mode", m)
+    print(f"Mode → {MODE_LABEL[m]}")
+
+
+def cmd_fan(env, args):
+    f = FAN_MAP.get(args.speed.lower())
+    if f is None:
+        sys.exit(f"Fan must be one of: {', '.join(sorted(FAN_MAP))}")
+    set_prop(env, get_dsn(env), "set_int_fan_speed", str(f))
+    print(f"Fan → {FAN_LABEL[f]}")
+
+
+def cmd_silent(env, args):
+    v = 1 if args.state.lower() in ("on", "1", "true") else 0
+    set_prop(env, get_dsn(env), "set_silent_function", v)
+    print(f"Silent → {'ON' if v == 1 else 'OFF'}")
+
+
+def cmd_raw(env, args):
+    dsn = get_dsn(env)
+    p = get_props(env, dsn)
+    print(json.dumps(p, indent=2, default=str))
+
+
+def cmd_login(env, _args):
+    """Force a fresh login (deletes cached tokens)."""
+    if TOKEN_PATH.exists():
+        TOKEN_PATH.unlink()
+    access = get_access(env)
+    print(f"Logged in. Token starts with: {access[:20]}…")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Control De'Longhi Pinguino over WiFi.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("devices", help="List devices on the account")
+    sub.add_parser("status", help="Show current state")
+    sub.add_parser("on", help="Turn on")
+    sub.add_parser("off", help="Turn off")
+    p_temp = sub.add_parser("temp", help="Set target temp (18-32°C)")
+    p_temp.add_argument("temperature")
+    p_mode = sub.add_parser("mode", help="Set mode")
+    p_mode.add_argument("mode", choices=sorted(MODE_MAP))
+    p_fan = sub.add_parser("fan", help="Set fan speed")
+    p_fan.add_argument("speed", choices=sorted(FAN_MAP))
+    p_silent = sub.add_parser("silent", help="Silent mode on/off")
+    p_silent.add_argument("state", choices=["on", "off"])
+    sub.add_parser("raw", help="Dump all device properties as JSON")
+    sub.add_parser("login", help="Force fresh login")
+
+    args = parser.parse_args()
+    env = load_env()
+    dispatch = {
+        "devices": cmd_devices, "status": cmd_status, "on": cmd_on, "off": cmd_off,
+        "temp": cmd_temp, "mode": cmd_mode, "fan": cmd_fan, "silent": cmd_silent,
+        "raw": cmd_raw, "login": cmd_login,
+    }
+    dispatch[args.cmd](env, args)
+
+
+if __name__ == "__main__":
+    main()
