@@ -431,15 +431,23 @@ The plugin intentionally exposes only `Off` and `Cool` thermostat modes. Dehumid
 If you do not already have Homebridge:
 
 ```sh
-npm install -g homebridge
+npm install -g homebridge homebridge-config-ui-x
 ```
 
 If you see a Homebridge warning about your Node.js version, switch to a Homebridge-supported Node release before running it long term. For Homebridge 2, use Node 22 or 24.
 
-On a Mac mini, you can run Homebridge as a LaunchAgent or through `homebridge-config-ui-x`. The simplest first test is to run it in a terminal:
+On a Mac mini, the simplest first test is to run Homebridge through the service runner. This starts both Homebridge and the web UI without installing a macOS service:
 
 ```sh
-homebridge
+hb-service run -U "$HOME/.homebridge" --stdout
+```
+
+The web UI will normally be available at `http://localhost:8581`.
+
+Installing Homebridge as a proper macOS service requires sudo:
+
+```sh
+sudo hb-service install --user "$USER" --port 8581 -U "$HOME/.homebridge"
 ```
 
 ### Install This Plugin Locally
