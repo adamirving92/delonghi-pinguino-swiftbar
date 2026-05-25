@@ -10,6 +10,7 @@ It gives you:
 - a Homebridge plugin so Apple Home, Siri, and HomePod can control it as a thermostat
 - room temperature, humidity, target temperature, mode, fan, silent, swing, and outdoor weather context
 - a one-click "Cool to 22°C" preset in the widget
+- optional Tapo/Kasa smart plug readings in the widget, including live watts and cost estimates
 
 ## Important
 
@@ -27,6 +28,7 @@ Why the app identifiers are not bundled:
 
 - Python 3.10+
 - `requests`
+- `python-kasa` if you want optional Tapo/Kasa energy readings
 - macOS + SwiftBar for the optional menu bar widget
 - Node.js + Homebridge for the optional Apple Home/HomePod bridge. Homebridge 2 currently expects Node 22 or 24.
 
@@ -84,6 +86,13 @@ DELONGHI_CLIENT_ID=
 DELONGHI_CLIENT_SECRET=
 DELONGHI_APP_ID=
 DELONGHI_APP_SECRET=
+
+# Optional Tapo/Kasa energy monitor for SwiftBar.
+AIRCON_TAPO_HOST=
+AIRCON_TAPO_OUTLET=1
+
+# Optional all-in marginal electricity rate, in pence per kWh.
+AIRCON_ELECTRICITY_RATE_P_PER_KWH=
 ```
 
 ### Required Values
@@ -133,6 +142,32 @@ Then copy the DSN into `.env`:
 ```env
 DELONGHI_DSN=AC000W000000000
 ```
+
+### Optional Energy Cost Values
+
+The SwiftBar widget can show live power draw and cost estimates when the aircon is plugged into a Tapo/Kasa energy-monitoring plug or power strip.
+
+Use:
+
+```env
+AIRCON_TAPO_HOST=192.168.1.50
+AIRCON_TAPO_OUTLET=3
+AIRCON_ELECTRICITY_RATE_P_PER_KWH=30.00
+```
+
+For a strip, `AIRCON_TAPO_OUTLET` is the socket number, starting at `1`.
+
+`AIRCON_ELECTRICITY_RATE_P_PER_KWH` should be your all-in marginal usage price in pence per kWh. Do not include standing charges or late-payment fees, because those are not caused by the aircon being on.
+
+If your bill breaks out Climate Change Levy and VAT, you can let the widget calculate the all-in rate instead:
+
+```env
+AIRCON_ELECTRICITY_UNIT_RATE_P_PER_KWH=24.00
+AIRCON_ELECTRICITY_CCL_P_PER_KWH=0.80
+AIRCON_ELECTRICITY_VAT_PERCENT=20
+```
+
+With those example values, the widget uses `29.76p/kWh`.
 
 ## Getting App/Client Identifiers
 
@@ -309,13 +344,15 @@ The widget refreshes every 30 seconds and uses restrained colour cues:
 - amber/red: room is above target
 - green: close to target
 
+If `AIRCON_TAPO_HOST` is configured, it also shows live watts, cost per hour, today/month kWh, and estimated cost. The Tapo integration needs `python-kasa` in the Python environment SwiftBar uses. On Apple Silicon Macs, the widget also tries `/opt/homebrew/bin/python3` as a fallback.
+
 Menu bar format:
 
 ```text
-❄ 24.5° -> 22°
+❄ 24.5° -> 22° · 30p/h
 ```
 
-That means current room temperature is 24.5°C and target is 22°C.
+That means current room temperature is 24.5°C, target is 22°C, and the live smart-plug reading currently works out at about 30p per hour.
 
 ## Troubleshooting
 
@@ -399,6 +436,7 @@ Most SwiftBar issues are one of:
 - `aircon` is not executable
 - `.env` is not next to `aircon`
 - `requests` is installed for a different Python
+- `python-kasa` is installed for a different Python, if energy readings are enabled
 - SwiftBar does not have the same shell environment as Terminal
 
 ## Apple Home / HomePod via Homebridge

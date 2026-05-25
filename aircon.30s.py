@@ -11,11 +11,13 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
 PROJECT_DIR = str(Path(__file__).resolve().parent)
-AIRCON = os.environ.get("AIRCON_CLI") or str(Path(__file__).with_name("aircon"))
+AIRCON = os.environ.get("AIRCON_CLI") or str(Path(PROJECT_DIR) / "aircon")
+ENV_PATH = Path(os.environ.get("AIRCON_ENV") or Path(PROJECT_DIR) / ".env")
 MODE_LABEL = {1: "cool", 2: "dry", 3: "fan"}
 MODE_EMOJI = {1: "❄", 2: "💧", 3: "🌀"}
 FAN_LABEL = {1: "low", 2: "mid", 3: "high", 4: "auto"}
@@ -25,6 +27,47 @@ COLOR_GREEN = "#2F855A"
 COLOR_AMBER = "#B7791F"
 COLOR_RED = "#C53030"
 COLOR_MUTED = "gray"
+
+
+def load_env():
+    env = {}
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+def env_value(env, *keys, default=None):
+    for key in keys:
+        if key in os.environ and os.environ[key] != "":
+            return os.environ[key]
+        if key in env and env[key] != "":
+            return env[key]
+    return default
+
+
+def env_float(env, *keys, default=None):
+    value = env_value(env, *keys)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def env_int(env, *keys, default=None):
+    value = env_value(env, *keys)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def fetch_state():
@@ -127,6 +170,236 @@ def pct(value):
     return f"{value:.0f}%"
 
 
+def format_watts(value):
+    value = as_float(value)
+    if value is None:
+        return "?"
+    if abs(value) >= 1000:
+        return f"{value / 1000:.2f} kW"
+    return f"{value:.0f} W"
+
+
+def format_kwh(value):
+    value = as_float(value)
+    if value is None:
+        return "?"
+    if abs(value) < 1:
+        return f"{value:.3f} kWh"
+    return f"{value:.2f} kWh"
+
+
+def format_money_pence(value):
+    value = as_float(value)
+    if value is None:
+        return "?"
+    if abs(value) < 10:
+        return f"{value:.1f}p"
+    if abs(value) < 100:
+        return f"{value:.0f}p"
+    return f"£{value / 100:.2f}"
+
+
+def electricity_rate_p_per_kwh(env):
+    direct = env_float(
+        env,
+        "AIRCON_ELECTRICITY_RATE_P_PER_KWH",
+        "ELECTRICITY_RATE_P_PER_KWH",
+    )
+    if direct is not None:
+        return direct
+
+    unit = env_float(
+        env,
+        "AIRCON_ELECTRICITY_UNIT_RATE_P_PER_KWH",
+        "ELECTRICITY_UNIT_RATE_P_PER_KWH",
+    )
+    if unit is None:
+        return None
+
+    ccl = env_float(
+        env,
+        "AIRCON_ELECTRICITY_CCL_P_PER_KWH",
+        "ELECTRICITY_CCL_P_PER_KWH",
+        default=0,
+    )
+    vat = env_float(
+        env,
+        "AIRCON_ELECTRICITY_VAT_PERCENT",
+        "ELECTRICITY_VAT_PERCENT",
+        default=0,
+    )
+    return (unit + ccl) * (1 + vat / 100)
+
+
+def _feature_value(device, key):
+    feature = getattr(device, "features", {}).get(key)
+    if feature is None:
+        return None
+    return getattr(feature, "value", None)
+
+
+async def _fetch_tapo_energy_async(host, outlet, timeout):
+    from kasa import Discover
+
+    dev = None
+    try:
+        dev = await Discover.discover_single(
+            host,
+            discovery_timeout=int(timeout),
+            timeout=int(timeout),
+        )
+        if dev is None:
+            raise RuntimeError(f"no Tapo device found at {host}")
+        await dev.update()
+        target = dev
+        children = getattr(dev, "children", []) or []
+        if children:
+            index = outlet - 1
+            if index < 0 or index >= len(children):
+                raise RuntimeError(f"Tapo outlet {outlet} not found")
+            target = children[index]
+            await target.update()
+
+        return {
+            "host": host,
+            "model": getattr(dev, "model", None),
+            "alias": getattr(target, "alias", None),
+            "outlet": outlet if children else None,
+            "is_on": bool(getattr(target, "is_on", False)),
+            "watts": _feature_value(target, "current_consumption"),
+            "today_kwh": _feature_value(target, "consumption_today"),
+            "month_kwh": _feature_value(target, "consumption_this_month"),
+        }
+    finally:
+        close = getattr(dev, "disconnect", None) or getattr(dev, "close", None)
+        if close:
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
+
+def _fetch_tapo_energy_current_python(host, outlet, timeout):
+    import asyncio
+
+    return asyncio.run(_fetch_tapo_energy_async(host, outlet, timeout))
+
+
+TAPO_HELPER = r"""
+import asyncio
+import json
+import sys
+
+
+def feature_value(device, key):
+    feature = getattr(device, "features", {}).get(key)
+    if feature is None:
+        return None
+    return getattr(feature, "value", None)
+
+
+async def main():
+    from kasa import Discover
+
+    host = sys.argv[1]
+    outlet = int(sys.argv[2])
+    timeout = int(float(sys.argv[3]))
+    dev = None
+    try:
+        dev = await Discover.discover_single(host, discovery_timeout=timeout, timeout=timeout)
+        if dev is None:
+            raise RuntimeError(f"no Tapo device found at {host}")
+        await dev.update()
+        target = dev
+        children = getattr(dev, "children", []) or []
+        if children:
+            index = outlet - 1
+            if index < 0 or index >= len(children):
+                raise RuntimeError(f"Tapo outlet {outlet} not found")
+            target = children[index]
+            await target.update()
+        print(json.dumps({
+            "host": host,
+            "model": getattr(dev, "model", None),
+            "alias": getattr(target, "alias", None),
+            "outlet": outlet if children else None,
+            "is_on": bool(getattr(target, "is_on", False)),
+            "watts": feature_value(target, "current_consumption"),
+            "today_kwh": feature_value(target, "consumption_today"),
+            "month_kwh": feature_value(target, "consumption_this_month"),
+        }))
+    finally:
+        close = getattr(dev, "disconnect", None) or getattr(dev, "close", None)
+        if close:
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
+
+asyncio.run(main())
+"""
+
+
+def _fetch_tapo_energy_helper(host, outlet, timeout):
+    candidates = [
+        env for env in [os.environ.get("AIRCON_TAPO_PYTHON")] if env
+    ]
+    candidates.extend([
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+    ])
+    seen = {sys.executable}
+    last_error = None
+    for python in candidates:
+        if not python or python in seen or not Path(python).exists():
+            continue
+        seen.add(python)
+        try:
+            result = subprocess.run(
+                [python, "-c", TAPO_HELPER, host, str(outlet), str(timeout)],
+                capture_output=True,
+                text=True,
+                timeout=float(timeout) + 3,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        last_error = (result.stderr or result.stdout).strip()
+    if last_error:
+        raise RuntimeError(last_error[:180])
+    raise RuntimeError("python-kasa is not available")
+
+
+def fetch_energy(env):
+    host = env_value(env, "AIRCON_TAPO_HOST", "TAPO_HOST")
+    if not host:
+        return None, None
+    outlet = env_int(env, "AIRCON_TAPO_OUTLET", "TAPO_OUTLET", default=1)
+    timeout = env_float(env, "AIRCON_TAPO_TIMEOUT_SECONDS", "TAPO_TIMEOUT_SECONDS", default=4)
+
+    try:
+        try:
+            energy = _fetch_tapo_energy_current_python(host, outlet, timeout)
+        except ModuleNotFoundError:
+            energy = _fetch_tapo_energy_helper(host, outlet, timeout)
+    except Exception as exc:
+        return None, str(exc)
+
+    rate = electricity_rate_p_per_kwh(env)
+    energy["rate_p_per_kwh"] = rate
+    watts = as_float(energy.get("watts"))
+    today_kwh = as_float(energy.get("today_kwh"))
+    month_kwh = as_float(energy.get("month_kwh"))
+    if rate is not None and watts is not None:
+        energy["cost_per_hour_p"] = watts / 1000 * rate
+    if rate is not None and today_kwh is not None:
+        energy["cost_today_p"] = today_kwh * rate
+    if rate is not None and month_kwh is not None:
+        energy["cost_month_p"] = month_kwh * rate
+    return energy, None
+
+
 def gap_value(room, setpoint):
     room = as_float(room)
     setpoint = as_float(setpoint)
@@ -188,6 +461,7 @@ def temp_bar(room, setpoint, low=18, high=32, width=18):
 
 
 def main():
+    env = load_env()
     state, err = fetch_state()
     if state is None:
         print("⚠️ aircon")
@@ -195,6 +469,7 @@ def main():
         print(f"Error: {err.strip()[:200] if err else 'unknown'}")
         print(f"Retry | refresh=true")
         return
+    energy, energy_err = fetch_energy(env)
 
     power = state.get("get_device_status")
     on = power == 1
@@ -220,8 +495,11 @@ def main():
     visual_bar = temp_bar(room, setpoint)
 
     # ---------- menu bar title ----------
+    energy_title = ""
+    if on and energy and energy.get("cost_per_hour_p") is not None:
+        energy_title = f" · {format_money_pence(energy.get('cost_per_hour_p'))}/h"
     if on:
-        print(f"{emoji} {menu_temp(room)} → {temp(setpoint, 0, '°')} | color={state_colour}")
+        print(f"{emoji} {menu_temp(room)} → {temp(setpoint, 0, '°')}{energy_title} | color={state_colour}")
     else:
         print(f"○ {menu_temp(room)} | color={COLOR_MUTED}")
 
@@ -242,6 +520,40 @@ def main():
     print(menu_line(f"Room      {temp(room)} · {pct(room_h)} humidity", size=12))
     print(menu_line(f"Outside   {temp(out_t)} · {pct(out_h)} · {weather}", size=12, color=COLOR_MUTED))
     print(menu_line(f"Updated   {datetime.now().strftime('%H:%M:%S')}", size=10, color=COLOR_MUTED))
+    if energy:
+        cost_per_hour = energy.get("cost_per_hour_p")
+        energy_colour = COLOR_GREEN if as_float(energy.get("watts")) == 0 else state_colour
+        print("---")
+        if cost_per_hour is not None:
+            print(menu_line(
+                f"Energy    {format_watts(energy.get('watts'))} · {format_money_pence(cost_per_hour)}/h",
+                size=12,
+                color=energy_colour,
+            ))
+        else:
+            print(menu_line(f"Energy    {format_watts(energy.get('watts'))}", size=12, color=energy_colour))
+        today_line = f"Today     {format_kwh(energy.get('today_kwh'))}"
+        if energy.get("cost_today_p") is not None:
+            today_line += f" · {format_money_pence(energy.get('cost_today_p'))}"
+        print(menu_line(today_line, size=11, color=COLOR_MUTED))
+        month_line = f"Month     {format_kwh(energy.get('month_kwh'))}"
+        if energy.get("cost_month_p") is not None:
+            month_line += f" · {format_money_pence(energy.get('cost_month_p'))}"
+        print(menu_line(month_line, size=11, color=COLOR_MUTED))
+        if energy.get("rate_p_per_kwh") is not None:
+            print(menu_line(
+                f"Tariff    {energy.get('rate_p_per_kwh'):.2f}p/kWh all-in",
+                size=10,
+                color=COLOR_MUTED,
+            ))
+        outlet = energy.get("outlet")
+        tapo_label = f"Tapo      outlet {outlet}" if outlet else "Tapo      device"
+        tapo_label += f" · {'on' if energy.get('is_on') else 'off'}"
+        print(menu_line(tapo_label, size=10, color=COLOR_MUTED))
+    elif energy_err:
+        print("---")
+        print(menu_line("Energy    not available", size=12, color=COLOR_AMBER))
+        print(menu_line(energy_err[:120], size=10, color=COLOR_MUTED))
     print("---")
 
     print(action_line("Cool to 22°C", preset_cmd(('mode', 'cool'), ('fan', 'auto'), ('temp', 22), ('on',)), color=COLOR_BLUE))
