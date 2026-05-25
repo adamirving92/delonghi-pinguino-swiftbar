@@ -1,0 +1,8 @@
+.env
+.tokens.json
+.DS_Store
+.git/
+node_modules/
+__pycache__/
+*.py[cod]
+homebridge-delonghi-pinguino-cli-*.tgz

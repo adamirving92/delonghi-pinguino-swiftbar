@@ -1,0 +1,34 @@
+{
+  "name": "homebridge-delonghi-pinguino-cli",
+  "version": "0.1.0",
+  "description": "Homebridge thermostat bridge for a De'Longhi Pinguino controlled by the companion aircon CLI.",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "homekit",
+    "siri",
+    "delonghi",
+    "pinguino",
+    "aircon",
+    "thermostat"
+  ],
+  "homepage": "https://github.com/adamirving92/delonghi-pinguino-swiftbar#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adamirving92/delonghi-pinguino-swiftbar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adamirving92/delonghi-pinguino-swiftbar/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "homebridge": ">=1.8.0 || >=2.0.0"
+  },
+  "scripts": {
+    "test": "node --check index.js && node scripts/smoke-homebridge-plugin.js"
+  }
+}

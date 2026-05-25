@@ -1,12 +1,13 @@
-# De'Longhi Pinguino Aircon CLI + SwiftBar Widget
+# De'Longhi Pinguino Aircon CLI + SwiftBar + Homebridge
 
-Small unofficial Python CLI and SwiftBar widget for a De'Longhi Pinguino portable air conditioner using the De'Longhi Comfort cloud flow.
+Small unofficial Python CLI, SwiftBar widget, and Homebridge thermostat bridge for a De'Longhi Pinguino portable air conditioner using the De'Longhi Comfort cloud flow.
 
 It gives you:
 
 - `aircon status`, `on`, `off`, `temp`, `mode`, `fan`, `silent`, and `raw`
 - `aircon doctor` to check local config without printing secrets
 - a low-key macOS menu bar widget via SwiftBar
+- a Homebridge plugin so Apple Home, Siri, and HomePod can control it as a thermostat
 - room temperature, humidity, target temperature, mode, fan, silent, swing, and outdoor weather context
 - a one-click "Cool to 22°C" preset in the widget
 
@@ -27,6 +28,7 @@ Why the app identifiers are not bundled:
 - Python 3.10+
 - `requests`
 - macOS + SwiftBar for the optional menu bar widget
+- Node.js + Homebridge for the optional Apple Home/HomePod bridge. Homebridge 2 currently expects Node 22 or 24.
 
 Install Python dependencies:
 
@@ -51,6 +53,7 @@ python3 -m pip install -r requirements.txt
 6. Run `./aircon devices`.
 7. Run `./aircon status`.
 8. Install `aircon.30s.py` into SwiftBar if you want the menu bar widget.
+9. Install the Homebridge plugin if you want Apple Home/HomePod control.
 
 ## Clone
 
@@ -398,10 +401,139 @@ Most SwiftBar issues are one of:
 - `requests` is installed for a different Python
 - SwiftBar does not have the same shell environment as Terminal
 
+## Apple Home / HomePod via Homebridge
+
+The Homebridge plugin exposes the Pinguino as a HomeKit thermostat. Once paired with Apple Home, you can control it from the Home app and with Siri on HomePod.
+
+Expected Siri phrases:
+
+```text
+Hey Siri, turn on the office aircon.
+Hey Siri, turn off the office aircon.
+Hey Siri, set the office aircon to 22 degrees.
+Hey Siri, what temperature is the office aircon set to?
+```
+
+HomeKit thermostat mapping:
+
+| HomeKit | CLI action |
+| --- | --- |
+| Off | `aircon off` |
+| Cool | `aircon mode cool` then `aircon on` |
+| Target temperature | `aircon temp <value>` |
+| Current temperature | `room_temp` from `aircon raw` |
+| Humidity sensor | `room_hum` from `aircon raw` |
+
+The plugin intentionally exposes only `Off` and `Cool` thermostat modes. Dehumidify, fan-only, fan speed, silent mode, and swing are still available through the CLI and SwiftBar widget. They can be added as separate HomeKit controls later, but the thermostat surface is the cleanest first HomePod integration.
+
+### Install Homebridge
+
+If you do not already have Homebridge:
+
+```sh
+npm install -g homebridge
+```
+
+If you see a Homebridge warning about your Node.js version, switch to a Homebridge-supported Node release before running it long term. For Homebridge 2, use Node 22 or 24.
+
+On a Mac mini, you can run Homebridge as a LaunchAgent or through `homebridge-config-ui-x`. The simplest first test is to run it in a terminal:
+
+```sh
+homebridge
+```
+
+### Install This Plugin Locally
+
+From this repo:
+
+```sh
+npm link
+```
+
+`npm link` registers the plugin in your global npm package directory, which is where a global Homebridge install looks for plugins.
+
+For a normal permanent install from GitHub:
+
+```sh
+npm install -g github:adamirving92/delonghi-pinguino-swiftbar
+```
+
+Make sure the `aircon` CLI works before starting Homebridge:
+
+```sh
+./aircon doctor
+./aircon status
+```
+
+### Configure Homebridge
+
+Add this to the `platforms` array in your Homebridge `config.json`:
+
+```json
+{
+  "platform": "DelonghiPinguinoCli",
+  "name": "Office Aircon",
+  "airconPath": "/absolute/path/to/aircon",
+  "refreshIntervalSeconds": 30,
+  "commandTimeoutSeconds": 25,
+  "minTemperature": 18,
+  "maxTemperature": 32,
+  "temperatureStep": 1,
+  "turnOnWhenSettingTemperature": true
+}
+```
+
+Use the real absolute path. Example:
+
+```json
+"airconPath": "/Users/adam/delonghi-pinguino-swiftbar/aircon"
+```
+
+If Homebridge runs from the same folder as this repo, `airconPath` can be omitted and the plugin will use the bundled `./aircon`.
+
+`turnOnWhenSettingTemperature` defaults to `true`. That means a Siri request such as "set Office Aircon to 22 degrees" will set cool mode, set the target temperature, and turn the unit on. Set it to `false` if you want temperature changes to leave power state untouched.
+
+### Pair With Apple Home
+
+1. Start Homebridge.
+2. Open the Home app on your iPhone.
+3. Tap Add Accessory.
+4. Scan the Homebridge QR code or enter its setup code.
+5. Put the thermostat in the correct room.
+6. Rename it if desired, for example `Office Aircon`.
+7. Test from the Home app before using HomePod.
+
+If Siri has trouble with the word "aircon", rename the accessory to `Office AC` or `Office Cooler` in the Home app.
+
+### Homebridge Troubleshooting
+
+Run the plugin smoke test:
+
+```sh
+npm test
+```
+
+Check the CLI from the same user that runs Homebridge:
+
+```sh
+/absolute/path/to/aircon doctor
+/absolute/path/to/aircon status
+```
+
+Common issues:
+
+- `airconPath` is relative and Homebridge starts from another directory. Use an absolute path.
+- `.env` is not next to the `aircon` script.
+- `aircon` is not executable. Run `chmod +x aircon`.
+- Python dependencies are installed for your Terminal user but not the Homebridge service user.
+- The first login has not been completed. Run `aircon login` once manually.
+- Siri does not hear the accessory name reliably. Rename it to something short in Apple Home.
+
 ## Security Notes
 
 - Never commit `.env`.
 - Never commit `.tokens.json`.
+- Do not paste `.env` values into Homebridge config.
 - Treat `.tokens.json` like a password.
 - Use `chmod 600 .env .tokens.json`.
 - Review `./aircon raw` output before sharing it.

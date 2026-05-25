@@ -1,0 +1,70 @@
+{
+  "pluginAlias": "DelonghiPinguinoCli",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Expose a De'Longhi Pinguino controlled by this repo's aircon CLI as an Apple Home thermostat for Siri/HomePod control.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Accessory Name",
+        "type": "string",
+        "default": "Office Aircon",
+        "required": true
+      },
+      "airconPath": {
+        "title": "Path to aircon CLI",
+        "type": "string",
+        "default": "./aircon",
+        "required": false
+      },
+      "refreshIntervalSeconds": {
+        "title": "Refresh Interval",
+        "type": "integer",
+        "default": 30,
+        "minimum": 5,
+        "maximum": 600,
+        "required": false
+      },
+      "commandTimeoutSeconds": {
+        "title": "Command Timeout",
+        "type": "integer",
+        "default": 25,
+        "minimum": 5,
+        "maximum": 120,
+        "required": false
+      },
+      "minTemperature": {
+        "title": "Minimum Target Temperature",
+        "type": "number",
+        "default": 18,
+        "minimum": 10,
+        "maximum": 30,
+        "required": false
+      },
+      "maxTemperature": {
+        "title": "Maximum Target Temperature",
+        "type": "number",
+        "default": 32,
+        "minimum": 18,
+        "maximum": 40,
+        "required": false
+      },
+      "temperatureStep": {
+        "title": "Temperature Step",
+        "type": "number",
+        "default": 1,
+        "minimum": 0.5,
+        "maximum": 5,
+        "required": false
+      },
+      "turnOnWhenSettingTemperature": {
+        "title": "Turn On When Siri Sets Temperature",
+        "type": "boolean",
+        "default": true,
+        "required": false,
+        "description": "When enabled, saying something like 'set Office Aircon to 22 degrees' sets cool mode, sets the target temperature, and turns the aircon on."
+      }
+    }
+  }
+}
